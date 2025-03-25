@@ -2,15 +2,26 @@ import pickle
 import matplotlib.pyplot as plt
 
 # Pickle-Datei laden
-with open("training_data.pkl", "rb") as f:
-    Q, TD_error_per_episode, reward_per_episode = pickle.load(f)
+with open("training_data_2.pkl", "rb") as f:
+    Q, TD_error_per_episode, reward_per_episode = pickle.load(f, fix_imports=True, encoding="latin1")
 
 
-plt.figure(figsize=(8, 5))
-plt.plot(TD_error_per_episode, label="TD-Error", color="red")
-plt.xlabel("Episode")
-plt.ylabel("TD-Error")
-plt.title("TD-Error pro Episode")
-plt.legend()
-plt.grid()
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 10))
+
+# Erster Plot: TD-Fehler
+ax1.plot(TD_error_per_episode, color="red")
+ax1.set_xlabel("Episodes")
+ax1.set_ylabel("TD-Error")
+ax1.set_title('Average absolute Bellman error per 100 steps')
+ax1.grid()
+
+# Zweiter Plot: Belohnung
+ax2.plot(reward_per_episode)
+ax2.set_xlabel("Episodes")
+ax2.set_ylabel("Reward")
+ax2.set_title('Average reward per 100 steps')
+ax2.grid()
+
+# Layout anpassen und anzeigen
+plt.tight_layout()
 plt.show()

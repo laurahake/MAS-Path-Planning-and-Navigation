@@ -4,6 +4,7 @@ import numpy as np
 from simple_pid import PID
 from scipy.special import softmax
 import pickle
+import random
 
 def print_state(state, size=9):
     print("The state is:")
@@ -97,7 +98,7 @@ def get_cont_action(observation, dimension, discrete_action, agent):
     return action
     
 
-def train(seed = None, kappa=1, T=10000, N=10, batchsize = 32, p = 0.6):
+def train(seed = None, kappa=1, T=10000, N=10, batchsize = 32, p = 0, c=1):
     
     if seed is not None:
         np.random.seed(seed)
@@ -111,19 +112,28 @@ def train(seed = None, kappa=1, T=10000, N=10, batchsize = 32, p = 0.6):
     replay_buffer = ReplayBuffer(max_size=50000, state_dim = 1, action_dim = 1)
     Q={}
     
-    def softmax_policy(Q,state):
-        if state not in Q:
-            Q[state] = np.zeros(action_space_num)
-        return np.random.choice(5, p=softmax(kappa*Q[state]))
+    def epsilon_greedy_policy(state, Q, episode, epsilon_min = 0.1, epsilon_decay = 0.999):
+        if episode <= 10:
+            epsilon = 1
+        else:
+            epsilon = max(epsilon_min, epsilon_decay ** (episode - 10)) 
+
+        if random.uniform(0, 1) < epsilon:
+            return random.choice(range(action_space_num))
+        else:
+            if state not in Q:
+                Q[state] = np.zeros(action_space_num)
+            return np.argmax(Q[state])
 
     
     TD_error_per_episode = []
     reward_per_episode = []
-    episode_length = 1000
+    episode_length = 100
     TD_error_episode = 0
     train = False
-    stepsize = [1/((step/N)**(p) + 100) for step in range(T)]
+    stepsize = [c/((step/N)**(p) + 1) for step in range(T)]
     agent_done = {agent: False for agent in env.agents}
+    episode = 1
     
     for step in range(T):
         agent_actions = {}
@@ -134,12 +144,10 @@ def train(seed = None, kappa=1, T=10000, N=10, batchsize = 32, p = 0.6):
             if env.terminations[agent]:
                 action = None
             else:
-                discrete_action = softmax_policy(Q,agent_states[agent])
+                discrete_action = epsilon_greedy_policy(agent_states[agent], Q, episode)
                 action = get_cont_action(observation, env.world.dim_p, discrete_action, agent)
                 agent_actions[agent] = discrete_action
-            env.step(action)
-            
-        #time.sleep(0.5)   
+            env.step(action)   
         
         env.agent_selection = env.agents[0]
         for agent in env.agents:
@@ -150,7 +158,6 @@ def train(seed = None, kappa=1, T=10000, N=10, batchsize = 32, p = 0.6):
             observation, reward, termination, truncation, info, next_state = env.last()
             agent_observations[agent] = observation 
             
-            #print(agent + ": Erreicht wurde Punkt: " + str(observation[0]) + ", " + str(observation[1]))
             if termination or truncation:
                 agent_done[agent] = True
             replay_buffer.store_transition(agent_states[agent], agent_actions[agent], reward,next_state,agent_done[agent])
@@ -174,6 +181,7 @@ def train(seed = None, kappa=1, T=10000, N=10, batchsize = 32, p = 0.6):
             
             if all(agent_done[agent] for agent in agent_done):
                 agent_states, agent_observations = env.reset()
+                episode +=1
                 agent_done = {agent: False for agent in env.agents}
                 break
         
@@ -181,14 +189,14 @@ def train(seed = None, kappa=1, T=10000, N=10, batchsize = 32, p = 0.6):
                 env.next_agent()
 
 
-        if step%episode_length == 0 and step != 0:
+        if step%episode_length == 0 and step != 0 and episode>10:
             TD_error_per_episode.append(TD_error_episode/episode_length)
             TD_error_episode = 0
             
             # Evaluation der aktuellen greedy policy
             reward_episode = 0
             evaluation_steps = 0
-            K = 100
+            K = 30
             for _ in range(K):
                 agent_states, agent_observations = env.reset(seed=seed)
                 agent_done = {agent: False for agent in env.agents}
