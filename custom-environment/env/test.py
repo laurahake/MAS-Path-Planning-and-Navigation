@@ -53,49 +53,6 @@ class ReplayBuffer:
         terminates = [self.terminal_memory[i] for i in batch]
         
         return states, actions, rewards, next_states, terminates
-
-def get_next_point(agent_x, agent_y, action, agent):
-    
-    gridsize = 0.05
-    goal_point = [0.0, 0.0]
-    if action == 0: #up
-        goal_point[0]=agent_x
-        goal_point[1]=agent_y+gridsize
-    if action == 1: #down
-        goal_point[0]=agent_x
-        goal_point[1]=agent_y-gridsize
-    if action == 2: #left
-        goal_point[0]=agent_x-gridsize
-        goal_point[1]=agent_y
-    if action == 3: #right
-        goal_point[0]=agent_x+gridsize
-        goal_point[1]=agent_y   
-    if action == 4: #wait
-        goal_point[0]=agent_x
-        goal_point[1]=agent_y
-    
-    if agent == None:
-        return goal_point
-    else:
-        #print(agent + ": Angesteuert wird Punkt: " + str(goal_point[0]) + ", " + str(goal_point[1]) + " . Von Punkt: "+str(agent_x) + " " + str(agent_y))
-        return goal_point
-
-def get_cont_action(observation, dimension, discrete_action, agent):
-    Kp = 0.1
-    Ki = 1
-    Kd = 0.0
-    
-    next_point = get_next_point(observation[0], observation[1], discrete_action, agent)
-    controller_x = PID(Kp, Ki, Kd, next_point[0])
-    controller_y = PID(Kp, Ki, Kd, next_point[0])
-    v_x = controller_x(observation[0])
-    v_y = controller_y(observation[1])
-    action = np.zeros(dimension * 2 + 1)
-    action[1] = -v_x
-    action[2] = 0
-    action[3] = -v_y
-    action[4] = 0
-    return action
     
 
 def train(seed = None, kappa=1, T=10000, N=10, batchsize = 32, p = 0, c=1):
@@ -145,9 +102,9 @@ def train(seed = None, kappa=1, T=10000, N=10, batchsize = 32, p = 0, c=1):
                 action = None
             else:
                 discrete_action = epsilon_greedy_policy(agent_states[agent], Q, episode)
-                action = get_cont_action(observation, env.world.dim_p, discrete_action, agent)
+                action = env.get_cont_action(observation, env.world.dim_p, discrete_action, agent)
                 agent_actions[agent] = discrete_action
-            env.step(action)   
+            env.step(action)
         
         env.agent_selection = env.agents[0]
         for agent in env.agents:
@@ -158,6 +115,7 @@ def train(seed = None, kappa=1, T=10000, N=10, batchsize = 32, p = 0, c=1):
             observation, reward, termination, truncation, info, next_state = env.last()
             agent_observations[agent] = observation 
             
+            #print(agent + ": Erreicht wurde Punkt: " + str(observation[0]) + ", " + str(observation[1]))
             if termination or truncation:
                 agent_done[agent] = True
             replay_buffer.store_transition(agent_states[agent], agent_actions[agent], reward,next_state,agent_done[agent])
@@ -196,7 +154,7 @@ def train(seed = None, kappa=1, T=10000, N=10, batchsize = 32, p = 0, c=1):
             # Evaluation der aktuellen greedy policy
             reward_episode = 0
             evaluation_steps = 0
-            K = 30
+            K = 10
             for _ in range(K):
                 agent_states, agent_observations = env.reset(seed=seed)
                 agent_done = {agent: False for agent in env.agents}
@@ -212,7 +170,7 @@ def train(seed = None, kappa=1, T=10000, N=10, batchsize = 32, p = 0, c=1):
                             if state not in Q:
                                 Q[state] = np.zeros(action_space_num)
                             discrete_action = np.argmax(Q[state])
-                            action = get_cont_action(observation, env.world.dim_p, discrete_action, agent)
+                            action = env.get_cont_action(observation, env.world.dim_p, discrete_action, agent)
                         env.step(action)
                         
                     env.agent_selection = env.agents[0]

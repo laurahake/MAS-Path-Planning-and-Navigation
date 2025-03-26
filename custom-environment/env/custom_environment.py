@@ -6,8 +6,9 @@ from node_class import Node
 from gymnasium.utils import EzPickle
 from gymnasium.core import ObsType
 from typing import Any
+from simple_pid import PID
 
-from pettingzoo.mpe._mpe_utils.core import World
+from pettingzoo.mpe._mpe_utils.core import World as BaseWorld
 from pettingzoo.mpe._mpe_utils.core import Landmark as BaseLandmark
 from pettingzoo.mpe._mpe_utils.core import Agent as BaseAgent
 from pettingzoo.mpe._mpe_utils.scenario import BaseScenario
@@ -28,13 +29,15 @@ class Agent(BaseAgent):
     Description: Agent object with the addition of a*-path attributes and the Q-Learning state
         
     """
-    def __init__(self):
+    def __init__(self, Kp = 2, Ki = 1, Kd = 0):
         super().__init__()
         self.a_star_old = []
         self.a_star_new = []
         self.goal_point = []
         size = 9
         self.q_state = [1] * (size * size)
+        self.controller_x = PID(Kp, Ki, Kd, setpoint=0)
+        self.controller_y = PID(Kp, Ki, Kd, setpoint=0)
 
 
 class Landmark(BaseLandmark):
@@ -98,6 +101,110 @@ class RectLandmark(BaseLandmark):
         agent_y = agent.state.p_pos[1]
     
         return x_min <= agent_x <= x_max and y_min <= agent_y <= y_max   
+    
+class World(BaseWorld):
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        
+    # get collision forces for any contact between two entities
+    def get_collision_force(self, entity_a, entity_b):
+        if (not entity_a.collide) or (not entity_b.collide):
+            return [None, None]  # not a collider
+        if entity_a is entity_b:
+            return [None, None]  # don't collide against itsel
+        
+        # Rectangle to Rectangle collision
+        if isinstance(entity_a, (RectLandmark, RandomLandmark)) and isinstance(entity_b, (RectLandmark, RandomLandmark)):
+            delta_pos = entity_a.state.p_pos - entity_b.state.p_pos
+            dist_x = np.abs(delta_pos[0])  
+            dist_y = np.abs(delta_pos[1])  
+
+            half_width_a = entity_a.size[0] / 2
+            half_height_a = entity_a.size[1] / 2
+            half_width_b = entity_b.size[0] / 2
+            half_height_b = entity_b.size[1] / 2
+            
+            dist_min_x = half_width_a + half_width_b
+            dist_min_y = half_height_a + half_height_b
+            
+            # softmax penetration
+            k = self.contact_margin
+            
+            penetration_x = np.logaddexp(0, -(dist_x - dist_min_x) / k) * k
+            penetration_y = np.logaddexp(0, -(dist_y - dist_min_y) / k) * k
+            
+            if penetration_x > 0.01 and penetration_y > 0.01:
+                if penetration_x > penetration_y:
+                    force_magnitude = self.contact_force * penetration_x
+                    force_direction = np.array([np.sign(delta_pos[0]), 0])
+                else:
+                    force_magnitude = self.contact_force * penetration_y
+                    force_direction = np.array([0, np.sign(delta_pos[1])])
+                    
+                force = force_magnitude * force_direction
+                force_a = force if entity_a.movable else None
+                force_b = -force if entity_b.movable else None
+                return [force_a, force_b]
+            return [None, None]
+        
+        # Rectangle to Non-Rectangle collision
+        elif isinstance(entity_a, (RectLandmark, RandomLandmark)) or isinstance(entity_b, (RectLandmark, RandomLandmark)):
+            if isinstance(entity_a, (RectLandmark, RandomLandmark)):
+                rect_entity = entity_a
+                non_rect_entity = entity_b
+            else: 
+                rect_entity = entity_b
+                non_rect_entity = entity_a
+                
+            delta_pos = entity_a.state.p_pos - entity_b.state.p_pos
+            dist_x = np.abs(delta_pos[0])  
+            dist_y = np.abs(delta_pos[1])
+
+            half_width = rect_entity.size[0] / 2
+            half_height = rect_entity.size[1] / 2
+            
+            dist_min_x = half_width + non_rect_entity.size
+            dist_min_y = half_height + non_rect_entity.size
+            
+            # softmax penetration
+            k = self.contact_margin
+            penetration_x = np.logaddexp(0, -(dist_x - dist_min_x) / k) * k
+            penetration_y = np.logaddexp(0, -(dist_y - dist_min_y) / k) * k
+            
+            if penetration_x > 0.01 and penetration_y > 0.01:
+                if penetration_x > penetration_y:
+                    penetration = penetration_x
+                    direction = np.array([np.sign(delta_pos[0]), 0])
+                else:
+                    penetration = penetration_y
+                    direction = np.array([0, np.sign(delta_pos[1])])
+
+                force = self.contact_force * direction * penetration
+                force_rect = -force if rect_entity.movable else None
+                force_non_rect = force if non_rect_entity.movable else None
+                
+                if isinstance(entity_a, (RectLandmark, RandomLandmark)):
+                    return [force_rect, force_non_rect]
+                else: 
+                    return [force_non_rect, force_rect]
+                
+            return [None, None]
+        
+        # Non-Rectangle to Non-Rectangle collision
+        elif not isinstance(entity_a, (RectLandmark, RandomLandmark)) and not isinstance(entity_b, (RectLandmark, RandomLandmark)):        
+            # compute actual distance between entities
+            delta_pos = entity_a.state.p_pos - entity_b.state.p_pos
+            dist = np.sqrt(np.sum(np.square(delta_pos)))
+            # minimum allowable distance
+            dist_min = entity_a.size + entity_b.size
+            # softmax penetration
+            k = self.contact_margin
+            penetration = np.logaddexp(0, -(dist - dist_min) / k) * k
+            force = self.contact_force * delta_pos / dist * penetration
+            force_a = +force if entity_a.movable else None
+            force_b = -force if entity_b.movable else None
+            return [force_a, force_b]
 
 
 class raw_env(SimpleEnv, EzPickle):
@@ -512,7 +619,8 @@ class raw_env(SimpleEnv, EzPickle):
                     for path_x, path_y in a_star_old:        
                         if math.isclose(x, path_x, abs_tol=epsilon) and math.isclose(y, path_y, abs_tol=epsilon):
                             state[index] += 16
-                            
+        
+        print(agent)                   
         return tuple(state)
 
     def last(
@@ -570,7 +678,8 @@ class raw_env(SimpleEnv, EzPickle):
             agent_object.movable = True
             agent_states[agent] = agent_object.q_state
             agent_observations[agent] = observation
-            
+            agent_object.controller_x = PID(setpoint=0)
+            agent_object.controller_y = PID(setpoint=0)
         return agent_states, agent_observations
     
         
@@ -677,6 +786,53 @@ class raw_env(SimpleEnv, EzPickle):
 
             self.rewards[agent.name] = reward
             self.terminations[agent.name] = self.scenario.is_termination(agent, self.world)
+            
+    def get_next_point(self, agent_x, agent_y, action, agent):
+        action_print = "nothing"
+        gridsize = 0.05
+        goal_point = [0.0, 0.0]
+        if action == 0: #up
+            goal_point[0]=agent_x
+            goal_point[1]=agent_y+gridsize
+            action_print = "up"
+        if action == 1: #down
+            goal_point[0]=agent_x
+            goal_point[1]=agent_y-gridsize
+            action_print = "down"
+        if action == 2: #left
+            goal_point[0]=agent_x-gridsize
+            goal_point[1]=agent_y
+            action_print = "left"
+        if action == 3: #right
+            goal_point[0]=agent_x+gridsize
+            goal_point[1]=agent_y   
+            action_print = "right"
+        if action == 4: #wait
+            goal_point[0]=agent_x
+            goal_point[1]=agent_y
+            action_print = "wait"
+        
+        if agent == None:
+            return goal_point
+        else:
+            #print(agent + ": Angesteuert wird Punkt: " + str(goal_point[0]) + ", " + str(goal_point[1]) + " . Von Punkt: "+str(agent_x) + " " + str(agent_y) + " . Aktion: " + action_print)
+            return goal_point
+
+    def get_cont_action(self, observation, dimension, discrete_action, agent):
+        agent_object = self.world.agents[self._index_map[agent]]
+        next_point = self.get_next_point(observation[0], observation[1], discrete_action, agent)
+        agent_object.controller_x.setpoint = next_point[0]
+        agent_object.controller_y.setpoint = next_point[1]
+        v_x = agent_object.controller_x(observation[0])
+        v_y = agent_object.controller_y(observation[1],)
+        action = np.zeros(dimension * 2 + 1)
+        action[1] = -v_x
+        action[2] = 0
+        action[3] = -v_y
+        action[4] = 0
+        #print(agent + ": vx: " + str(v_x) + " . vy: " + str(v_y)) 
+        return action
+
 
 env = make_env(raw_env)
 parallel_env = parallel_wrapper_fn(env)
