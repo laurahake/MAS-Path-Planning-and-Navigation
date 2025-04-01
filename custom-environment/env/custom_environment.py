@@ -38,6 +38,7 @@ class Agent(BaseAgent):
         self.q_state = [1] * (size * size)
         self.controller_x = PID(Kp, Ki, Kd, setpoint=0)
         self.controller_y = PID(Kp, Ki, Kd, setpoint=0)
+        self.terminated =  False
 
 
 class Landmark(BaseLandmark):
@@ -173,6 +174,7 @@ class World(BaseWorld):
             penetration_y = np.logaddexp(0, -(dist_y - dist_min_y) / k) * k
             
             if penetration_x > 0.01 and penetration_y > 0.01:
+                non_rect_entity.terminated = True
                 if penetration_x > penetration_y:
                     penetration = penetration_x
                     direction = np.array([np.sign(delta_pos[0]), 0])
@@ -201,6 +203,9 @@ class World(BaseWorld):
             # softmax penetration
             k = self.contact_margin
             penetration = np.logaddexp(0, -(dist - dist_min) / k) * k
+            if penetration > 0.01:
+                entity_a.terminated = True
+                entity_b.terminated = True
             force = self.contact_force * delta_pos / dist * penetration
             force_a = +force if entity_a.movable else None
             force_b = -force if entity_b.movable else None
@@ -369,6 +374,15 @@ class raw_env(SimpleEnv, EzPickle):
         Description: checks if the given coordinates are colliding with obstacles.
         
         """
+        # check for collision with wall
+        epsilon = 5e-2
+        if q_learning and (
+            math.isclose(x, -1, abs_tol=epsilon) or math.isclose(x, 1, abs_tol=epsilon) or
+            math.isclose(y, -1, abs_tol=epsilon) or math.isclose(y, 1, abs_tol=epsilon)
+        ):
+            return True
+        
+        # check for collision with landmarks
         for landmark in self.world.landmarks:
             if isinstance(landmark, (RectLandmark, RandomLandmark) if q_learning else RectLandmark):
                 x_min = (landmark.state.p_pos[0] - landmark.size[0] / 2) -0.05
@@ -618,9 +632,7 @@ class raw_env(SimpleEnv, EzPickle):
                             state[index] += 8
                     for path_x, path_y in a_star_old:        
                         if math.isclose(x, path_x, abs_tol=epsilon) and math.isclose(y, path_y, abs_tol=epsilon):
-                            state[index] += 16
-        
-        print(agent)                   
+                            state[index] += 16                  
         return tuple(state)
 
     def last(
@@ -680,6 +692,7 @@ class raw_env(SimpleEnv, EzPickle):
             agent_observations[agent] = observation
             agent_object.controller_x = PID(setpoint=0)
             agent_object.controller_y = PID(setpoint=0)
+            agent_object.terminated = False
         return agent_states, agent_observations
     
         
@@ -926,7 +939,16 @@ class Scenario(BaseScenario):
             agent.state.c = np.zeros(world.dim_c)
             while True:
                 pos = np_random.uniform(-0.6, +0.6, world.dim_p)
-                if not self.is_in_landmark(world, pos[0], pos[1]):
+                if self.is_in_landmark(world, pos[0], pos[1]):
+                    continue
+                goal_collision = any(
+                    hasattr(other, 'goal_point') and isinstance(other.goal_point, list) and len(other.goal_point) == 2 and
+                    np.linalg.norm(np.array(pos) - np.array(other.goal_point)) < 0.15
+                    for other in world.agents 
+                    if other is not agent
+                )
+            
+                if not goal_collision:
                     agent.goal_point = pos
                     break
             
@@ -934,7 +956,7 @@ class Scenario(BaseScenario):
         
     def is_in_landmark(self, world, pos_x, pos_y):
         for landmark in world.landmarks:
-            if isinstance(landmark, RectLandmark):
+            if isinstance(landmark, (RectLandmark, RandomLandmark)):
                 x_min = (landmark.state.p_pos[0] - landmark.size[0] / 2) -0.05
                 x_max = (landmark.state.p_pos[0] + landmark.size[0] / 2) +0.05
                 y_min = (landmark.state.p_pos[1] - landmark.size[1] / 2) -0.05
@@ -959,6 +981,13 @@ class Scenario(BaseScenario):
             return True
         elif math.isclose(y, 1.0, abs_tol=epsilon) or math.isclose(y, -1.0, abs_tol=epsilon):
             return True
+    
+    def is_goal(self, agent):
+        delta_pos = agent.state.p_pos - agent.goal_point
+        epsilon = 0.05
+        dist = np.sqrt(np.sum(np.square(delta_pos)))
+        dist_min = agent.size*2+epsilon
+        return True if dist < dist_min else False  
             
     
     def reward(self, agent, world, was_astar_step):
@@ -997,6 +1026,9 @@ class Scenario(BaseScenario):
 
     
     def is_termination(self, agent, world):
+        if agent.terminated:
+            return True
+        
         termination = False
         for landmark in world.landmarks:
             if landmark.is_collision(agent):
@@ -1010,6 +1042,9 @@ class Scenario(BaseScenario):
                     termination = True
         
         if self.is_out_of_bounds(agent):
+            termination = True
+            
+        if self.is_goal(agent):
             termination = True
         
         return termination
