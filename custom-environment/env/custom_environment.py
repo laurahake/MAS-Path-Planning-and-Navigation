@@ -834,14 +834,23 @@ class raw_env(SimpleEnv, EzPickle):
     def get_cont_action(self, observation, dimension, discrete_action, agent):
         agent_object = self.world.agents[self._index_map[agent]]
         next_point = self.get_next_point(observation[0], observation[1], discrete_action, agent)
+        
+        if discrete_action == 4:  # WAIT
+            agent_object.controller_x.setpoint = observation[0]
+            agent_object.controller_y.setpoint = observation[1]
+            agent_object.controller_x.reset()
+            agent_object.controller_y.reset()
+            agent_object.state.p_vel = np.zeros_like(agent_object.state.p_vel)
+            return np.zeros(dimension * 2 + 1)
+        
         agent_object.controller_x.setpoint = next_point[0]
         agent_object.controller_y.setpoint = next_point[1]
         v_x = agent_object.controller_x(observation[0])
         v_y = agent_object.controller_y(observation[1],)
         action = np.zeros(dimension * 2 + 1)
-        action[1] = -v_x
+        action[1] = v_x
         action[2] = 0
-        action[3] = -v_y
+        action[3] = v_y
         action[4] = 0
         #print(agent + ": vx: " + str(v_x) + " . vy: " + str(v_y)) 
         return action
@@ -869,6 +878,7 @@ class Scenario(BaseScenario):
             agent.size = 0.05
             agent.accel = 4.0
             agent.max_speed = 1.3
+            agent.damping = 0.5
         # add landmarks
         world.landmarks = [RectLandmark() for i in range(num_landmarks)]
         world.landmarks.append(RandomLandmark())
