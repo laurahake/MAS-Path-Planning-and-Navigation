@@ -1,5 +1,7 @@
 .vscode/launch.json
 .vscode/settings.json
+env/test_control.py
+env/test_greedy.py
 *.cpyt
 *.pyc
 *.pkl

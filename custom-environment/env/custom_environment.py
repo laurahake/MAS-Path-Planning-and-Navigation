@@ -29,7 +29,7 @@ class Agent(BaseAgent):
     Description: Agent object with the addition of a*-path attributes and the Q-Learning state
         
     """
-    def __init__(self, Kp = 2, Ki = 1, Kd = 0):
+    def __init__(self, Kp = 10, Ki = 0, Kd = 0):
         super().__init__()
         self.a_star_old = []
         self.a_star_new = []
@@ -108,6 +108,32 @@ class World(BaseWorld):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         
+    
+    def integrate_state(self, p_force):
+        for i, entity in enumerate(self.entities):
+            if not entity.movable:
+                continue
+            
+            if p_force[i] is not None:
+                entity.state.p_pos += p_force[i] * self.dt
+                
+            entity.state.p_vel = np.zeros_like(entity.state.p_vel)
+    
+    
+    def apply_action_force(self, p_force):
+        # set applied forces
+        for i, agent in enumerate(self.agents):
+            if agent.movable:
+                action = agent.action.u  # [0, -vx, 0, -vy, 0]
+                vx = action[0]
+                vy = action[1]
+                scale = 2.0
+                p_force[i] = np.array([vx, vy])* scale
+        return p_force
+    
+    def apply_environment_force(self, p_force):
+        return p_force
+    
     # get collision forces for any contact between two entities
     def get_collision_force(self, entity_a, entity_b):
         if (not entity_a.collide) or (not entity_b.collide):
@@ -215,7 +241,7 @@ class World(BaseWorld):
 class raw_env(SimpleEnv, EzPickle):
     def __init__(
         self,
-        num_good=3,
+        num_good=1,
         num_obstacles=4,
         max_cycles=100,
         continuous_actions=True,
@@ -836,23 +862,24 @@ class raw_env(SimpleEnv, EzPickle):
         next_point = self.get_next_point(observation[0], observation[1], discrete_action, agent)
         
         if discrete_action == 4:  # WAIT
-            agent_object.controller_x.setpoint = observation[0]
-            agent_object.controller_y.setpoint = observation[1]
             agent_object.controller_x.reset()
             agent_object.controller_y.reset()
-            agent_object.state.p_vel = np.zeros_like(agent_object.state.p_vel)
             return np.zeros(dimension * 2 + 1)
         
         agent_object.controller_x.setpoint = next_point[0]
         agent_object.controller_y.setpoint = next_point[1]
+        
+        agent_object.state.p_vel = np.zeros_like(agent_object.state.p_vel)
+        
         v_x = agent_object.controller_x(observation[0])
-        v_y = agent_object.controller_y(observation[1],)
+        v_y = agent_object.controller_y(observation[1])
+        
         action = np.zeros(dimension * 2 + 1)
-        action[1] = v_x
+        action[1] = -v_x
         action[2] = 0
-        action[3] = v_y
+        action[3] = -v_y
         action[4] = 0
-        #print(agent + ": vx: " + str(v_x) + " . vy: " + str(v_y)) 
+        #print(agent + ": vx: " + str(v_x) + " . vy: " + Fstr(v_y)) 
         return action
 
 
