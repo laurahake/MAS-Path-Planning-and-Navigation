@@ -93,10 +93,12 @@ class RectLandmark(BaseLandmark):
         self.size = np.array([0.2, 0.4])
     
     def is_collision(self, agent):
-        x_min = self.state.p_pos[0] - self.size[0] / 2
-        x_max = self.state.p_pos[0] + self.size[0] / 2
-        y_min = self.state.p_pos[1] - self.size[1] / 2
-        y_max = self.state.p_pos[1] + self.size[1] / 2
+        buffer = agent.size
+
+        x_min = self.state.p_pos[0] - self.size[0] / 2 - buffer
+        x_max = self.state.p_pos[0] + self.size[0] / 2 + buffer
+        y_min = self.state.p_pos[1] - self.size[1] / 2 - buffer
+        y_max = self.state.p_pos[1] + self.size[1] / 2 + buffer
     
         agent_x = agent.state.p_pos[0]
         agent_y = agent.state.p_pos[1]
@@ -241,7 +243,7 @@ class World(BaseWorld):
 class raw_env(SimpleEnv, EzPickle):
     def __init__(
         self,
-        num_good=1,
+        num_good=3,
         num_obstacles=4,
         max_cycles=100,
         continuous_actions=True,
@@ -426,7 +428,6 @@ class raw_env(SimpleEnv, EzPickle):
         """
         cell_size = 0.05
         epsilon = 5e-2
-        
         num_steps_x = int((1.95 // cell_size) + 1)
         num_steps_y = int((1.95 // cell_size) + 1)
         
@@ -435,6 +436,8 @@ class raw_env(SimpleEnv, EzPickle):
         node_grid = [[None for _ in range(num_steps_y)]for _ in range(num_steps_x)]
         start_node = None
         end_node = None
+        min_start_dist = float('inf')
+        min_end_dist = float('inf')
         
         # create nodes
         for x in range(num_steps_x):
@@ -445,11 +448,18 @@ class raw_env(SimpleEnv, EzPickle):
                     new_node = Node(x_coordinate, y_coordinate, 1)
                     node_grid[x][y] = new_node
                     grid.append(new_node)
-                    if math.isclose(x_coordinate, agent_pos_x, abs_tol=epsilon) and math.isclose(y_coordinate, agent_pos_y, abs_tol=epsilon):
-                        start_node = node_grid[x][y]
-                    if math.isclose(x_coordinate, goal_pos_x, abs_tol=epsilon) and math.isclose(y_coordinate, goal_pos_y, abs_tol=epsilon):
-                        end_node = node_grid[x][y]
-                
+                    
+                    dist_start = math.hypot(x_coordinate - agent_pos_x, y_coordinate - agent_pos_y)
+                    dist_end = math.hypot(x_coordinate - goal_pos_x, y_coordinate - goal_pos_y)
+
+                    if dist_start < min_start_dist:
+                        min_start_dist = dist_start
+                        start_node = new_node
+
+                    if dist_end < min_end_dist:
+                        min_end_dist = dist_end
+                        end_node = new_node
+            
         # connect nodes
         for x in range(num_steps_x):
             for y in range(num_steps_y):
@@ -671,6 +681,9 @@ class raw_env(SimpleEnv, EzPickle):
         agent_object = self.world.agents[self._index_map[agent]]
         
         agent_object.q_state = self.q_learning_state_space(agent_object, agent_object.a_star_new, agent_object.a_star_old)
+        if all(val == 1 for val in agent_object.q_state):
+            self.terminations[agent] = True
+            agent_object.terminated = True
         
         return (
             observation,
@@ -994,10 +1007,10 @@ class Scenario(BaseScenario):
     def is_in_landmark(self, world, pos_x, pos_y):
         for landmark in world.landmarks:
             if isinstance(landmark, (RectLandmark, RandomLandmark)):
-                x_min = (landmark.state.p_pos[0] - landmark.size[0] / 2) -0.05
-                x_max = (landmark.state.p_pos[0] + landmark.size[0] / 2) +0.05
-                y_min = (landmark.state.p_pos[1] - landmark.size[1] / 2) -0.05
-                y_max = (landmark.state.p_pos[1] + landmark.size[1] / 2) +0.05
+                x_min = (landmark.state.p_pos[0] - landmark.size[0] / 2)
+                x_max = (landmark.state.p_pos[0] + landmark.size[0] / 2)
+                y_min = (landmark.state.p_pos[1] - landmark.size[1] / 2)
+                y_max = (landmark.state.p_pos[1] + landmark.size[1] / 2)
     
                 if x_min <= pos_x <= x_max and y_min <= pos_y <= y_max:
                         return True
@@ -1021,7 +1034,7 @@ class Scenario(BaseScenario):
     
     def is_goal(self, agent):
         delta_pos = agent.state.p_pos - agent.goal_point
-        epsilon = 0.05
+        epsilon = 25e-3
         dist = np.sqrt(np.sum(np.square(delta_pos)))
         dist_min = agent.size*2+epsilon
         return True if dist < dist_min else False  
