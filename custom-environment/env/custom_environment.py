@@ -259,6 +259,10 @@ class raw_env(SimpleEnv, EzPickle):
         )
         scenario = Scenario()
         world = scenario.make_world(num_good, num_obstacles)
+        
+        self.epsilon_runtime = scenario.epsilon_runtime
+        self.epsilon_planning = scenario.epsilon_planning
+        
         SimpleEnv.__init__(
             self,
             scenario=scenario,
@@ -397,26 +401,25 @@ class raw_env(SimpleEnv, EzPickle):
             ), f"Coordinates {(x, y)} are out of bounds."
     
                 
-    def is_obstacle(self, x, y, q_learning = False):
+    def is_obstacle(self, x, y, q_learning = False, override_epsilon = None):
         """
         Description: checks if the given coordinates are colliding with obstacles.
         
         """
+        epsilon = self.epsilon_planning if q_learning else self.epsilon_runtime
+        if override_epsilon is not None:
+            epsilon = override_epsilon
         # check for collision with wall
-        epsilon = 5e-2
-        if q_learning and (
-            math.isclose(x, -1, abs_tol=epsilon) or math.isclose(x, 1, abs_tol=epsilon) or
-            math.isclose(y, -1, abs_tol=epsilon) or math.isclose(y, 1, abs_tol=epsilon)
-        ):
+        border_limit = 0.98 
+        if q_learning and (abs(x) >= border_limit or abs(y) >= border_limit):
             return True
         
-        # check for collision with landmarks
         for landmark in self.world.landmarks:
             if isinstance(landmark, (RectLandmark, RandomLandmark) if q_learning else RectLandmark):
-                x_min = (landmark.state.p_pos[0] - landmark.size[0] / 2) -0.05
-                x_max = (landmark.state.p_pos[0] + landmark.size[0] / 2) +0.05
-                y_min = (landmark.state.p_pos[1] - landmark.size[1] / 2) -0.05
-                y_max = (landmark.state.p_pos[1] + landmark.size[1] / 2) +0.05
+                x_min = landmark.state.p_pos[0] - landmark.size[0] / 2 - epsilon
+                x_max = landmark.state.p_pos[0] + landmark.size[0] / 2 + epsilon
+                y_min = landmark.state.p_pos[1] - landmark.size[1] / 2 - epsilon
+                y_max = landmark.state.p_pos[1] + landmark.size[1] / 2 + epsilon
                 if x_min <= x <= x_max and y_min <= y <= y_max:
                     return True
         return False
@@ -547,30 +550,27 @@ class raw_env(SimpleEnv, EzPickle):
                      returns either static or the direction the agent is moving in
         
         """
-        status = "free"
         for agent in self.world.agents:
             # agent should not detect himself as an obstacle
             if agent == current_agent:
-                status = "free"
+                continue
             else:
                 euclidian_dis = math.sqrt((x - agent.state.p_pos[0]) ** 2 + (y - agent.state.p_pos[1]) ** 2)
                 if euclidian_dis <= agent.size:
+                    if agent.action.u is None:
+                        return "static"
                     
-                    if agent.state.p_vel[0] == 0 and agent.state.p_vel[1] == 0:
+                    vx = agent.action.u[0]
+                    vy = agent.action.u[1]
+                    
+                    if abs(vx) < 1e-3 and abs(vy) < 1e-3:
                         return "static"
                     else:
-                        if abs(agent.state.p_vel[0]) > abs(agent.state.p_vel[1]):
-                            if agent.state.p_vel[0] > 0:
-                                status = "east"
-                            else:
-                                status = "west"
+                        if abs(vx) > abs(vy):
+                            return "east" if vx > 0 else "west"
                         else:
-                            if agent.state.p_vel[1] > 0:
-                                status = "north"
-                            else:
-                                status = "south"
-        
-        return status
+                            return "north" if vy > 0 else "south"
+        return "free"
     
     
     def q_learning_state_space(self, agent, a_star_new, a_star_old):
@@ -610,7 +610,7 @@ class raw_env(SimpleEnv, EzPickle):
                 if(r, c) == (agent_grid, agent_grid):
                     state[index] = 1
                 
-                elif self.is_obstacle(x, y, q_learning=True):
+                elif self.is_obstacle(x, y, q_learning=True, override_epsilon=0.015):
                     state[index] = 2
                 else:
                     dyn_status = self.is_dyn_obstacle(x, y, agent)
@@ -625,43 +625,12 @@ class raw_env(SimpleEnv, EzPickle):
                     elif dyn_status == "east":
                         state[index] = 7
 
-        # set spaces behind obstacles to unkown
-        for r in range(size):
-            for c in range(size):
-                index = get_index(r, c)
-                
-                if state[index] in [2, 3, 4, 5, 6, 7]:
-                    # find direction relative to agent
-                    dr = r - agent_grid
-                    dc = c - agent_grid
-                    if abs(dr) > abs(dc):
-                        # up or down
-                        direction = (-1, 0) if dr < 0 else (1, 0)
-                    elif abs(dr) < abs(dc):
-                        # left or right
-                        direction = (0, -1) if dc < 0 else (0, 1)
-                    else:
-                        # diagonal
-                        if dr == dc:
-                            direction = (-1, -1) if dc <0 else (1, 1) # south-west or north-east
-                        else:
-                            direction = (1, -1) if dc < dr else (-1, 1) # north-west or south-east
-
-                    nr = r + direction[0]
-                    nc = c + direction[1]
-                    while 0 <= nr < size and 0 <= nc < size:
-                        next_index = get_index(nr, nc)
-                        if state[next_index] in [2, 3, 4, 5, 6, 7]:
-                            break
-                        state[next_index] = 8
-                        nr = int(nr + direction[0])
-                        nc = int(nc + direction[1])
-
         epsilon = 25e-3 
         for r in range(size):
             for c in range(size):
                 index = get_index(r,c)
-                if state[index] in [1, 3, 4, 5, 6, 7]:
+                # static obstacle(2) can also be part of the Astar path -> random obstacles, overlapping
+                if state[index] in [1, 2, 3, 4, 5, 6, 7]:
                     x, y = start_pos_x + c * cell_size, start_pos_y + r * cell_size
                     for path_x, path_y in a_star_new:
                         if math.isclose(x, path_x, abs_tol=epsilon) and math.isclose(y, path_y, abs_tol=epsilon):
@@ -681,9 +650,11 @@ class raw_env(SimpleEnv, EzPickle):
         agent_object = self.world.agents[self._index_map[agent]]
         
         agent_object.q_state = self.q_learning_state_space(agent_object, agent_object.a_star_new, agent_object.a_star_old)
-        if all(val == 1 for val in agent_object.q_state):
+        # check for +8 and +16 A_star flag
+        if not any((val & 8) or (val & 16) for val in agent_object.q_state):
             self.terminations[agent] = True
             agent_object.terminated = True
+            print(f"[TERMINATED] {agent} sees no A* path in local state — terminating.")
         
         return (
             observation,
@@ -723,7 +694,7 @@ class raw_env(SimpleEnv, EzPickle):
             a_star_path = self.A_star(start_node, end_node)
             if a_star_path is None:
                 print("Es konnte kein Pfad gefunden werden")
-            agent_object.a_star_new = a_star_path[1:] # remove first element
+            agent_object.a_star_new = a_star_path[2:] # remove first two elements
             agent_object.a_star_old = []
             agent_object.q_state = self.q_learning_state_space(agent_object, agent_object.a_star_new, agent_object.a_star_old)
             agent_object.movable = True
@@ -795,6 +766,7 @@ class raw_env(SimpleEnv, EzPickle):
         epsilon = 25e-3
         for path_x, path_y in agent.a_star_new:
             if math.isclose(agent.state.p_pos[0],path_x, abs_tol=epsilon) and math.isclose(agent.state.p_pos[1], path_y, abs_tol=epsilon):
+                print_state(agent.q_state)
                 path_node = (path_x, path_y)
                 agent.a_star_old.append(path_node)
                 agent.a_star_new.remove(path_node)
@@ -901,6 +873,11 @@ parallel_env = parallel_wrapper_fn(env)
 
 
 class Scenario(BaseScenario):
+    def __init__(self):
+        super().__init__()
+        self.epsilon_runtime = 5e-3
+        self.epsilon_planning = 9e-2
+    
     def make_world(self, num_good=2, num_obstacles=4):
         world = World()
         # set any world properties first
@@ -968,6 +945,7 @@ class Scenario(BaseScenario):
         
         for agent in world.agents:
             agent.state.p_vel = np.zeros(world.dim_p)
+            
             while True:
                 pos = np_random.uniform(-1.0, +1.0, world.dim_p)
                 if self.is_in_landmark(world, pos[0], pos[1]):
@@ -976,7 +954,7 @@ class Scenario(BaseScenario):
                 agent.state.p_pos = pos
                 
                 collision = any(
-                    self.is_collision(agent, other) 
+                    np.linalg.norm(agent.state.p_pos - other.state.p_pos) < (agent.size + other.size)
                     for other in world.agents 
                     if other is not agent and other.state.p_pos is not None
                 )
@@ -1007,10 +985,12 @@ class Scenario(BaseScenario):
     def is_in_landmark(self, world, pos_x, pos_y):
         for landmark in world.landmarks:
             if isinstance(landmark, (RectLandmark, RandomLandmark)):
-                x_min = (landmark.state.p_pos[0] - landmark.size[0] / 2)
-                x_max = (landmark.state.p_pos[0] + landmark.size[0] / 2)
-                y_min = (landmark.state.p_pos[1] - landmark.size[1] / 2)
-                y_max = (landmark.state.p_pos[1] + landmark.size[1] / 2)
+                if landmark.state.p_pos is None:
+                    continue
+                x_min = landmark.state.p_pos[0] - landmark.size[0] / 2 - self.epsilon_planning
+                x_max = landmark.state.p_pos[0] + landmark.size[0] / 2 + self.epsilon_planning
+                y_min = landmark.state.p_pos[1] - landmark.size[1] / 2 - self.epsilon_planning
+                y_max = landmark.state.p_pos[1] + landmark.size[1] / 2 + self.epsilon_planning
     
                 if x_min <= pos_x <= x_max and y_min <= pos_y <= y_max:
                         return True
@@ -1020,23 +1000,17 @@ class Scenario(BaseScenario):
     def is_collision(self, agent1, agent2):
         delta_pos = agent1.state.p_pos - agent2.state.p_pos
         dist = np.sqrt(np.sum(np.square(delta_pos)))
-        dist_min = agent1.size + agent2.size
+        dist_min = agent1.size + agent2.size + self.epsilon_runtime
         return True if dist < dist_min else False
     
-    def is_out_of_bounds(self, agent):
-        x = agent.state.p_pos[0]
-        y = agent.state.p_pos[1]
-        epsilon = 25e-3
-        if math.isclose(x, 1.0, abs_tol=epsilon) or math.isclose(x, -1.0, abs_tol=epsilon):
-            return True
-        elif math.isclose(y, 1.0, abs_tol=epsilon) or math.isclose(y, -1.0, abs_tol=epsilon):
-            return True
+    def is_out_of_bounds(self, agent, margin = 0.05):
+        bound = 1.0 + margin
+        return np.any(np.abs(agent.state.p_pos) > bound)
     
     def is_goal(self, agent):
         delta_pos = agent.state.p_pos - agent.goal_point
-        epsilon = 25e-3
         dist = np.sqrt(np.sum(np.square(delta_pos)))
-        dist_min = agent.size*2+epsilon
+        dist_min = agent.size + self.epsilon_runtime
         return True if dist < dist_min else False  
             
     
@@ -1060,7 +1034,7 @@ class Scenario(BaseScenario):
         if was_astar_step:
             reward += 0.5        # choose A*
             
-        reward -= 0.01          # time penalty
+        reward -= 0.1          # time penalty
                 
         return reward
 

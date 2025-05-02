@@ -7,8 +7,10 @@ import hashlib
 import os
 import matplotlib.pyplot as plt
 
-def stable_hash(state):
-    return int(hashlib.md5(str(state).encode()).hexdigest(), 16)
+def stable_hash(state, num_states=25_000_000):
+    state = np.array(state, dtype=np.int32)
+    state_bytes = state.tobytes()
+    return int(hashlib.sha256(state_bytes).hexdigest(), 16) % num_states
 
 
 def print_state(state, size=9):
@@ -77,7 +79,7 @@ def train(seed = None, kappa=1, T=250000, N=10, batchsize = 32, p = 0, c=1, chec
     def get_index(state):
         return stable_hash(state) % num_states
     
-    def epsilon_greedy_policy(state, Q, episode, epsilon_min = 0.1, epsilon_decay = 0.999):
+    def epsilon_greedy_policy(state, Q, episode, epsilon_min = 0.1, epsilon_decay = 0.99):
         idx = stable_hash(state) % num_states
 
         if episode <= 10:
@@ -91,8 +93,8 @@ def train(seed = None, kappa=1, T=250000, N=10, batchsize = 32, p = 0, c=1, chec
             return int(np.argmax(Q[idx]))
         
         
-    if os.path.exists("checkpoint.pkl"):
-        with open("checkpoint.pkl", "rb") as f:
+    if os.path.exists("checkpoint_eps_0.9999.pkl"):
+        with open("checkpoint_eps_0.9999.pkl", "rb") as f:
             Q, TD_error_per_episode, reward_per_episode, step_start, episode = pickle.load(f)
         print(f"checkpoint loaded. Start at step {step_start}, episode {episode}")
     else:
@@ -108,6 +110,9 @@ def train(seed = None, kappa=1, T=250000, N=10, batchsize = 32, p = 0, c=1, chec
     train = False
     stepsize = [c/((step/N)**(p) + 1) for step in range(T)]
     agent_done = {agent: False for agent in env.agents}
+    agent_old_pos = {agent: np.copy(env.world.agents[env._index_map[agent]].state.p_pos) for agent in env.agents}
+    steps_since_progress = {agent: 0 for agent in env.agents}
+
     
     try:
         for step in range(step_start, T):
@@ -116,7 +121,7 @@ def train(seed = None, kappa=1, T=250000, N=10, batchsize = 32, p = 0, c=1, chec
             
             for agent in env.agents:
                 observation = agent_observations[agent]
-                if env.terminations[agent]:
+                if agent_done[agent]:
                     action = None
                 else:
                     discrete_action = epsilon_greedy_policy(agent_states[agent], Q, episode)
@@ -129,6 +134,24 @@ def train(seed = None, kappa=1, T=250000, N=10, batchsize = 32, p = 0, c=1, chec
                 if agent_done[agent]:
                     env.next_agent()
                     continue
+                
+                # dead state detection
+                agent_object = env.world.agents[env._index_map[agent]]
+                current_pos = agent_object.state.p_pos
+                old_pos = agent_old_pos[agent]
+                delta_pos = np.linalg.norm(current_pos - old_pos)
+
+                if delta_pos < 0.045: 
+                    steps_since_progress[agent] += 1
+                else:
+                    steps_since_progress[agent] = 0
+                    agent_old_pos[agent] = np.copy(current_pos)
+
+                if steps_since_progress[agent] > 20:  
+                    agent_done[agent] = True
+                    env.terminations[agent] = True
+                    agent_object.terminated = True
+                
                 observation, reward, termination, truncation, info, next_state = env.last()
                 agent_observations[agent] = observation 
                 if termination or truncation:
@@ -156,6 +179,8 @@ def train(seed = None, kappa=1, T=250000, N=10, batchsize = 32, p = 0, c=1, chec
                 
             if all(agent_done[agent] for agent in agent_done):
                 agent_states, agent_observations = env.reset()
+                agent_old_pos = {agent: np.copy(env.world.agents[env._index_map[agent]].state.p_pos) for agent in env.agents}
+                steps_since_progress = {agent: 0 for agent in env.agents}
                 agent_done = {agent: False for agent in env.agents}
                 episode +=1
 
@@ -172,13 +197,18 @@ def train(seed = None, kappa=1, T=250000, N=10, batchsize = 32, p = 0, c=1, chec
                     while not all(agent_done[agent] for agent in agent_done):
                         env.agent_selection = env.agents[0]
                         for agent in env.agents:
-                            if env.terminations[agent]:
+                            if agent_done[agent]:
                                 action = None
                             else:
                                 state = agent_states[agent]
                                 observation = agent_observations[agent]
                                 idx = get_index(state)
-                                discrete_action = np.argmax(Q[idx])
+                                # avoid bias if all Q values are 0
+                                q_vals = Q[idx]
+                                max_q = np.max(q_vals)
+                                best_actions = np.flatnonzero(q_vals == max_q)
+                                discrete_action = np.random.choice(best_actions)
+                                
                                 action = env.get_cont_action(observation, env.world.dim_p, discrete_action, agent)
                             env.step(action)
                             
@@ -187,6 +217,26 @@ def train(seed = None, kappa=1, T=250000, N=10, batchsize = 32, p = 0, c=1, chec
                             if agent_done[agent] == True:
                                 env.next_agent()
                                 continue
+                            
+                            # dead state detection
+                            agent_object = env.world.agents[env._index_map[agent]]
+                            current_pos = agent_object.state.p_pos
+                            old_pos = agent_old_pos[agent]
+                            delta_pos = np.linalg.norm(current_pos - old_pos)
+
+                            if delta_pos < 0.045:  
+                                steps_since_progress[agent] += 1
+                            else:
+                                steps_since_progress[agent] = 0
+                                agent_old_pos[agent] = np.copy(current_pos)
+
+                            if steps_since_progress[agent] > 20:  
+                                agent_done[agent] = True
+                                env.terminations[agent] = True
+                                agent_object.terminated = True
+                                print(f"[TERMINATED] {agent} was marked as stuck after {steps_since_progress[agent]} steps without movement.")
+                                
+                            
                             observation, reward, termination, truncation, info, state = env.last()
                             agent_observations[agent] = observation
                             if termination or truncation:
@@ -198,6 +248,8 @@ def train(seed = None, kappa=1, T=250000, N=10, batchsize = 32, p = 0, c=1, chec
                         
                 reward_per_episode.append(reward_episode/evaluation_steps)
                 agent_states, agent_observations= env.reset()
+                agent_old_pos = {agent: np.copy(env.world.agents[env._index_map[agent]].state.p_pos) for agent in env.agents}
+                steps_since_progress = {agent: 0 for agent in env.agents}
                 agent_done = {agent: False for agent in env.agents}
                     
             if step % checkpoint_freq == 0 and step > 0:
@@ -222,7 +274,8 @@ def train(seed = None, kappa=1, T=250000, N=10, batchsize = 32, p = 0, c=1, chec
                 axs[1].grid(True)
 
                 plt.tight_layout()
-                plt.show()
+                plt.savefig("training_progress.png")
+                plt.close()
 
             print(f"Step {step}")
 
